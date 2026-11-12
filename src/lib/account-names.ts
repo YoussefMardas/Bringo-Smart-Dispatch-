@@ -12,3 +12,4 @@ export function storeEmail(storeName: string, domain: string, taken: Set<string>
   for (let n = 2; taken.has(email); n++) email = `${local}.${n}@${domain}`;
   return email;
 }
+

@@ -78,6 +78,8 @@ export async function resetStoreAccountPassword(userId: string): Promise<{ email
   return { email: user.email, storeName: user.store?.name ?? "", password };
 }
 
+
+
 /** Nouveaux mots de passe temporaires pour tous les comptes Master Magasin qui n'ont jamais choisi le leur. */
 export async function resetPendingPasswords(): Promise<CreatedAccount[]> {
   const users = await prisma.user.findMany({

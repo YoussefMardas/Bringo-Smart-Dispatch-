@@ -1,0 +1,140 @@
+// Bringo Smart Distribution — schéma de base de données (PostgreSQL / Supabase)
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+enum Role {
+  SUPER_ADMIN
+  OPS_MASTER
+  STORE_MASTER
+}
+
+model Store {
+  id            String         @id @default(cuid())
+  name          String
+  code          String         @unique
+  city          String?
+  active        Boolean        @default(true)
+  createdAt     DateTime       @default(now())
+  users         User[]
+  slots         WorkSlot[]
+  orders        Order[]
+  distributions Distribution[]
+  notifications Notification[]
+}
+
+model User {
+  id            String         @id @default(cuid())
+  email         String         @unique
+  name          String
+  passwordHash  String
+  role          Role
+  storeId       String?
+  store         Store?         @relation(fields: [storeId], references: [id], onDelete: SetNull)
+  /// true pour les comptes générés automatiquement : invite à changer le mot de passe temporaire.
+  mustChangePassword Boolean   @default(false)
+  createdAt     DateTime       @default(now())
+  distributions Distribution[]
+  notifications Notification[]
+}
+
+/// Un créneau opérationnel de 2 h pour un magasin et une date.
+/// Porte le nombre de pickers disponibles et les commandes à distribuer.
+model WorkSlot {
+  id        String   @id @default(cuid())
+  storeId   String
+  store     Store    @relation(fields: [storeId], references: [id], onDelete: Cascade)
+  date      DateTime @db.Date
+  slot      String // créneau normalisé ex. "08:00-10:00" (ou texte d'origine du fichier)
+  pickers   Int      @default(0)
+  orders    Order[]
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([storeId, date, slot])
+}
+
+/// Commande importée depuis le fichier .xlsm.
+/// `reference` = Order Number, `articles` = Number Of Products.
+/// `raw` conserve les 46 colonnes du fichier pour les traitements internes.
+model Order {
+  id        String   @id @default(cuid())
+  storeId   String
+  store     Store    @relation(fields: [storeId], references: [id], onDelete: Cascade)
+  slotId    String
+  slot      WorkSlot @relation(fields: [slotId], references: [id], onDelete: Cascade)
+  reference String
+  articles  Int
+  /// OK | LATE | CANCELLED | OTHER — voir src/lib/order-status.ts (seuls OK et LATE sont dispatchés)
+  status    String   @default("OTHER")
+  raw       Json?
+  createdAt DateTime @default(now())
+
+  @@unique([storeId, reference])
+  @@index([slotId, status])
+  @@index([storeId])
+}
+
+/// Historique : instantané d'une distribution enregistrée (les commandes sont copiées
+/// dans `result`, l'historique reste donc lisible si les commandes sont modifiées ensuite).
+model Distribution {
+  id            String   @id @default(cuid())
+  storeId       String
+  store         Store    @relation(fields: [storeId], references: [id], onDelete: Cascade)
+  date          DateTime @db.Date
+  slot          String
+  orderCount    Int
+  totalArticles Int
+  pickerCount   Int
+  makespan      Float
+  strategy      String
+  result        Json
+  createdById   String?
+  createdBy     User?    @relation(fields: [createdById], references: [id], onDelete: SetNull)
+  createdAt     DateTime @default(now())
+
+  @@index([storeId, date])
+  @@index([createdAt])
+}
+
+/// Notification destinée à un utilisateur (ex. Master Opérations : un Master Magasin a modifié les pickers).
+model Notification {
+  id        String    @id @default(cuid())
+  userId    String
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  storeId   String?
+  store     Store?    @relation(fields: [storeId], references: [id], onDelete: SetNull)
+  type      String
+  title     String
+  message   String
+  readAt    DateTime?
+  createdAt DateTime  @default(now())
+
+  @@index([userId, readAt])
+  @@index([userId, createdAt])
+}
+
+/// Ligne unique (id = "main") : version des données et statut de la dernière synchronisation.
+/// Les navigateurs la consultent régulièrement et se rafraîchissent quand `version` change.
+model SyncState {
+  id            String    @id
+  version       Int       @default(0)
+  lastSuccessAt DateTime?
+  lastStatus    String    @default("idle") // idle | ok | error
+  lastError     String?
+  updatedAt     DateTime  @updatedAt
+  /// Prochaine tentative autorisée (60 s après un succès, délai croissant après un échec)
+  nextAttemptAt DateTime?
+  /// Verrou : une seule synchronisation à la fois, même avec plusieurs navigateurs / instances
+  lockedUntil   DateTime?
+  failures      Int      @default(0)
+  /// Résumé de la dernière passe (lignes lues, ajoutées, mises à jour, ignorées…)
+  lastSummary   Json?
+}

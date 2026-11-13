@@ -8,6 +8,7 @@ import type { SyncSummary } from "@/lib/sync-state";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Table, TBody, TD, TH, THead, TR } from "@/components/ui/table";
+import { LocalTime } from "@/components/local-time";
 import { PageHeader } from "@/components/page-header";
 import { clearDataAction } from "@/app/(app)/import/actions";
 
@@ -24,9 +25,6 @@ interface Props {
     summary: SyncSummary | null;
   };
 }
-
-const when = (iso: string) =>
-  new Intl.DateTimeFormat("fr-FR", { dateStyle: "short", timeStyle: "medium", timeZone: "Africa/Casablanca" }).format(new Date(iso));
 
 export function SourcePanel({ configured, current, historyCount, sync }: Props) {
   const router = useRouter();
@@ -82,12 +80,12 @@ export function SourcePanel({ configured, current, historyCount, sync }: Props) 
         </CardHeader>
         <CardContent className="flex flex-col gap-3 text-sm">
           <p>
-            {sync.lastSuccessAt ? <>Dernière synchronisation réussie : <strong>{when(sync.lastSuccessAt)}</strong></> : "Aucune synchronisation réussie pour le moment."}
+            {sync.lastSuccessAt ? <>Dernière synchronisation réussie : <strong><LocalTime iso={sync.lastSuccessAt} /></strong></> : "Aucune synchronisation réussie pour le moment."}
           </p>
           {sync.status === "error" && (
             <p className="rounded-lg bg-destructive/5 px-3 py-2 text-destructive">
               Échec (tentative {sync.failures}) : {sync.lastError}
-              {sync.nextAttemptAt && <> — nouvelle tentative automatique vers {when(sync.nextAttemptAt)}.</>}
+              {sync.nextAttemptAt && <> — nouvelle tentative automatique vers <LocalTime iso={sync.nextAttemptAt} />.</>}
             </p>
           )}
           {s && (

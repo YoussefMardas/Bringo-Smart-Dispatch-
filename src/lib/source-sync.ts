@@ -16,10 +16,10 @@ const scrub = (msg: string) => msg.replace(/api_key=[^&\s"')]+/gi, "api_key=***"
 async function fetchCsv(): Promise<string> {
   let res: Response;
   try {
-    res = await fetch(sourceUrl(), { cache: "no-store", signal: AbortSignal.timeout(45_000), headers: { Accept: "text/csv" } });
+    res = await fetch(sourceUrl(), { cache: "no-store", signal: AbortSignal.timeout(20_000), headers: { Accept: "text/csv" } });
   } catch (e) {
     const timeout = e instanceof Error && (e.name === "TimeoutError" || e.name === "AbortError");
-    throw new Error(timeout ? "La source ne répond pas (délai de 45 s dépassé)." : `Source injoignable : ${scrub(e instanceof Error ? e.message : "erreur réseau")}.`);
+    throw new Error(timeout ? "La source ne répond pas (délai de 20 s dépassé)." : `Source injoignable : ${scrub(e instanceof Error ? e.message : "erreur réseau")}.`);
   }
   if (!res.ok) {
     throw new Error(res.status === 401 || res.status === 403 ? "Accès refusé par la source (clé d'API invalide ou expirée)." : `La source a répondu HTTP ${res.status}.`);
@@ -32,7 +32,9 @@ async function fetchCsv(): Promise<string> {
 /** Une passe complète : lecture du CSV, ingestion par lots, comptes magasins, notification. Lève en cas d'échec. */
 async function runOnce(): Promise<{ summary: SyncSummary; changed: boolean }> {
   const started = Date.now();
-  const parsed = parseRedashCsv(await fetchCsv());
+  const csv = await fetchCsv();
+  const tFetch = Date.now() - started;
+  const parsed = parseRedashCsv(csv);
 
   // Jours récents d'abord (aujourd'hui en priorité) ; un lot en échec n'interrompt pas les suivants.
   const rows: ImportRow[] = [...parsed.orders]
@@ -53,6 +55,7 @@ async function runOnce(): Promise<{ summary: SyncSummary; changed: boolean }> {
       failures.push(`lignes ${i + 1}–${Math.min(i + MAX_ROWS_PER_CHUNK, rows.length)} : ${scrub(e instanceof Error ? e.message : "erreur")}`);
     }
   }
+  console.log(`[source-sync] lecture ${tFetch} ms, total ingestion ${Date.now() - started} ms, ${rows.length} commandes Hyper`);
   if (failures.length) throw new Error(`Import partiel, ${failures.length} lot(s) en échec (${failures[0]}). Nouvelle tentative automatique.`);
 
   // Chaque Hyper reçoit son compte Master Magasin (mot de passe temporaire : à générer dans « Comptes magasins »).
@@ -90,7 +93,12 @@ async function runOnce(): Promise<{ summary: SyncSummary; changed: boolean }> {
 export async function syncIfDue(): Promise<void> {
   if (!sourceConfigured() || !(await tryAcquireSync())) return;
   try {
-    const { summary, changed } = await runOnce();
+    // Garde-fou : la fonction est tuée à 60 s ; on préfère échouer proprement à 50 s (erreur visible, verrou libéré, relance auto).
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const deadline = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => reject(new Error("La synchronisation dépasse 50 s (base de données lente ?). Nouvelle tentative automatique.")), 50_000);
+    });
+    const { summary, changed } = await Promise.race([runOnce(), deadline]).finally(() => clearTimeout(timer));
     await finishSync({ ok: true, changed, summary });
   } catch (e) {
     await finishSync({ ok: false, changed: false, error: scrub(e instanceof Error ? e.message : "Erreur de synchronisation.") });

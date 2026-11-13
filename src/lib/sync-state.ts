@@ -5,7 +5,7 @@ import { backoffDelay } from "@/lib/retry";
 
 const ID = "main";
 export const SUCCESS_INTERVAL_MS = Number(process.env.SYNC_INTERVAL_SECONDS ?? 60) * 1000 || 60_000;
-const LOCK_MS = 3 * 60_000; // un verrou orphelin (instance interrompue) expire seul
+const LOCK_MS = 75_000; // un peu plus que le délai maximal d'une fonction (60 s) : un verrou orphelin expire vite
 
 export interface SyncSummary {
   at: string;
@@ -75,4 +75,12 @@ export async function finishSync(input: { ok: boolean; error?: string; changed: 
 
 export async function getSyncState() {
   return prisma.syncState.findUnique({ where: { id: ID } });
+}
+
+/** Une passe est-elle due ? (lecture de l'état déjà chargé : aucune requête de plus à chaque interrogation des navigateurs) */
+export function isDue(state: { nextAttemptAt: Date | null; lockedUntil: Date | null } | null): boolean {
+  const now = Date.now();
+  if (!state) return true;
+  if (state.lockedUntil && state.lockedUntil.getTime() > now) return false;
+  return !state.nextAttemptAt || state.nextAttemptAt.getTime() <= now;
 }

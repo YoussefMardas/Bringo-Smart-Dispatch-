@@ -1,8 +1,8 @@
 import { after } from "next/server";
-import { syncIfDue } from "@/lib/source-sync";
+import { sourceConfigured, syncIfDue } from "@/lib/source-sync";
 import { getCurrentUser } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
-import { getSyncState } from "@/lib/sync-state";
+import { getSyncState, isDue } from "@/lib/sync-state";
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 60; // la passe de synchronisation continue après la réponse (Vercel)
@@ -27,9 +27,6 @@ async function handle() {
   const user = await getCurrentUser();
   if (!user) return Response.json({ error: "unauthorized" }, { status: 401 });
 
-  // Chaque navigateur ouvert fait office de déclencheur : si une passe est due (verrou en base), elle part en arrière-plan.
-  after(() => syncIfDue().catch((e) => console.error("[source-sync]", e)));
-
   const [state, unread, latest] = await Promise.all([
     getSyncState(),
     prisma.notification.count({ where: { userId: user.id, readAt: null } }),
@@ -40,6 +37,9 @@ async function handle() {
       select: { id: true, title: true, message: true, createdAt: true, readAt: true },
     }),
   ]);
+
+  // Chaque navigateur ouvert fait office de déclencheur : si une passe est due, elle part en arrière-plan.
+  if (sourceConfigured() && isDue(state)) after(() => syncIfDue().catch((e) => console.error("[source-sync]", e)));
 
   return Response.json(
     {

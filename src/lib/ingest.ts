@@ -1,7 +1,7 @@
 import "server-only";
 import { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
-import { isDateString, toDbDate } from "@/lib/slots";
+import { fromDbDate, isDateString, toDbDate } from "@/lib/slots";
 import { isHyperStore, norm, type RawValue } from "@/lib/order-source";
 import { classifyStatus } from "@/lib/order-status";
 import type { CreatedAccount } from "@/lib/accounts";
@@ -99,20 +99,25 @@ export async function ingestRows(input: {
       }
     }
 
-    // 2) Créneaux
-    const slotIds = new Map<string, string>();
+    // 2) Créneaux : une seule requête d'insertion (doublons ignorés) + une lecture, au lieu d'un aller-retour par créneau
+    const wanted = new Map<string, { storeId: string; date: string; slot: string }>();
     for (const r of rows) {
       const storeId = storeByName.get(norm(r.store))!;
-      const key = `${storeId}|${r.date}|${r.slot}`;
-      if (slotIds.has(key)) continue;
-      const slot = await prisma.workSlot.upsert({
-        where: { storeId_date_slot: { storeId, date: toDbDate(r.date), slot: r.slot } },
-        update: {},
-        create: { storeId, date: toDbDate(r.date), slot: r.slot },
-        select: { id: true },
-      });
-      slotIds.set(key, slot.id);
+      wanted.set(`${storeId}|${r.date}|${r.slot}`, { storeId, date: r.date, slot: r.slot });
     }
+    await prisma.workSlot.createMany({
+      data: [...wanted.values()].map((w) => ({ storeId: w.storeId, date: toDbDate(w.date), slot: w.slot })),
+      skipDuplicates: true,
+    });
+    const foundSlots = await prisma.workSlot.findMany({
+      where: {
+        storeId: { in: [...new Set([...wanted.values()].map((w) => w.storeId))] },
+        date: { in: [...new Set([...wanted.values()].map((w) => w.date))].map(toDbDate) },
+      },
+      select: { id: true, storeId: true, date: true, slot: true },
+    });
+    const slotIds = new Map(foundSlots.map((w) => [`${w.storeId}|${fromDbDate(w.date)}|${w.slot}`, w.id]));
+    for (const key of wanted.keys()) if (!slotIds.has(key)) throw new Error("Créneau introuvable après création.");
 
     // 3) Commandes : ajout / mise à jour
     const byStore = new Map<string, string[]>();
@@ -127,7 +132,7 @@ export async function ingestRows(input: {
     const existingByKey = new Map(existing.map((o) => [`${o.storeId}|${o.reference}`, o]));
 
     const creates: Prisma.OrderCreateManyInput[] = [];
-    const updates: Prisma.PrismaPromise<unknown>[] = [];
+    const updates: { id: string; slotId: string; articles: number; status: string; raw: string }[] = [];
     let unchanged = 0;
     for (const r of rows) {
       const storeId = storeByName.get(norm(r.store))!;
@@ -143,19 +148,23 @@ export async function ingestRows(input: {
         current.slotId !== slotId ||
         stable(current.raw) !== stable(r.raw)
       ) {
-        updates.push(
-          prisma.order.update({
-            where: { id: current.id },
-            data: { slotId, articles: r.products, status, raw: r.raw as Prisma.InputJsonValue },
-          }),
-        );
+        updates.push({ id: current.id, slotId, articles: r.products, status, raw: JSON.stringify(r.raw) });
       } else {
         unchanged++;
       }
     }
+    // Écritures groupées : une requête d'insertion + une seule requête UPDATE ... FROM unnest(...) pour toutes les mises à jour.
     await prisma.$transaction([
-      ...updates,
       prisma.order.createMany({ data: creates, skipDuplicates: true }),
+      ...(updates.length
+        ? [
+            prisma.$executeRaw`UPDATE "Order" AS o
+              SET "slotId" = v.slot_id, "articles" = v.articles, "status" = v.status, "raw" = v.raw::jsonb
+              FROM unnest(${updates.map((u) => u.id)}::text[], ${updates.map((u) => u.slotId)}::text[], ${updates.map((u) => u.articles)}::int[],
+                          ${updates.map((u) => u.status)}::text[], ${updates.map((u) => u.raw)}::text[]) AS v(id, slot_id, articles, status, raw)
+              WHERE o."id" = v.id`,
+          ]
+        : []),
     ]);
 
     return { added: creates.length, updated: updates.length, unchanged, skipped: problems.length, problems: problems.slice(0, 20), accounts: [] };
